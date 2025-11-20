@@ -34,6 +34,9 @@ jobs:
         # export COREPACK_SKIP_SIGNATURES=true
         # corepack enable && export COREPACK_SKIP_SIGNATURES=true && pnpm i --frozen-lockfile
         pnpm i --frozen-lockfile
+        echo "正在生成 Protobuf TS 类型文件..."
+        mkdir -p src/types/proto  # 确保输出目录存在
+        buf generate --out src/types/proto  # 核心命令：用 buf 编译 proto 文件生成类型
         pnpm build
         mkdir -p ../artifact
         rm -rf ../server/router/frontend/dist
