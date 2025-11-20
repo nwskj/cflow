@@ -29,43 +29,54 @@ jobs:
         git clone https://github.com/Vespa314/cflow.git
         npm install -g pnpm
 
-    - name: Build Frontend (完善 Protobuf 依赖 + 修复生成命令)
+    - name: Build Frontend (彻底修复 Protobuf 生成逻辑)
       run: |
         cd cflow/web
         pnpm i --frozen-lockfile
         cd ..
         
-        # 1. 下载完整的 Google Protobuf 公共依赖（含标准类型和 API 定义）
+        # 1. 下载完整的 Google Protobuf 公共依赖
         echo "下载 Google Protobuf 公共依赖..."
         mkdir -p ./proto/google/{api,protobuf}
-        # 标准 Protobuf 类型（解决 google/protobuf/xxx.proto 缺失）
+        # 标准 Protobuf 类型
         wget -qO ./proto/google/protobuf/descriptor.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto
         wget -qO ./proto/google/protobuf/empty.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/empty.proto
         wget -qO ./proto/google/protobuf/timestamp.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/timestamp.proto
         wget -qO ./proto/google/protobuf/field_mask.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/field_mask.proto
-        # Google API 定义（解决 google/api/annotations.proto 缺失）
+        # Google API 定义
         wget -qO ./proto/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto
         wget -qO ./proto/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto
         
-        # 2. 确认 proto 文件路径
-        PROTO_DIR="./proto/api/v2"
-        if [ ! -d "$PROTO_DIR" ]; then
-          PROTO_DIR="./web/proto/api/v2"
+        # 2. 查找并验证 proto 文件（关键修复：确保找到输入文件）
+        PROTO_FILES=$(find ./proto -name "*.proto" -path "*/api/v2/*")
+        if [ -z "$PROTO_FILES" ]; then
+          echo "警告：未找到 api/v2 目录下的 .proto 文件，尝试备用路径..."
+          PROTO_FILES=$(find ./web/proto -name "*.proto" -path "*/api/v2/*")
         fi
-        echo "使用 proto 文件路径：$PROTO_DIR"
+        if [ -z "$PROTO_FILES" ]; then
+          echo "错误：未找到任何 .proto 文件，无法生成类型文件"
+          exit 1
+        fi
+        echo "找到的 proto 文件："
+        echo "$PROTO_FILES"
         
-        # 3. 修复 protoc 命令（明确指定输入文件，避免 "Missing output directives"）
+        # 3. 修复 protoc 命令（删除行尾注释，确保参数连续）
         echo "生成 TypeScript 类型文件..."
         protoc \
-          --proto_path=./proto \  # 依赖查找根目录
+          --proto_path=./proto \
           --plugin=./web/node_modules/.bin/protoc-gen-ts_proto \
-          --ts_proto_out=./web/src/types/proto \  # 输出目录
+          --ts_proto_out=./web/src/types/proto \
           --ts_proto_opt=esModuleInterop=true,forceLong=string,useOptionals=messages,outputTypeRegistry=true \
-          $(find $PROTO_DIR -name "*.proto")  # 明确输入所有 proto 文件
+          $PROTO_FILES
         
-        # 4. 强制创建输出目录（防止生成失败）
+        # 4. 验证类型文件生成结果
         mkdir -p ./web/src/types/proto/api/v2
-        echo "类型文件生成完成，目录结构："
+        GENERATED_FILES=$(ls ./web/src/types/proto/api/v2/*.ts 2>/dev/null | wc -l)
+        if [ $GENERATED_FILES -eq 0 ]; then
+          echo "错误：未生成任何 TypeScript 类型文件"
+          exit 1
+        fi
+        echo "成功生成 $GENERATED_FILES 个类型文件，目录结构："
         ls -la ./web/src/types/proto/api/v2/
         
         # 5. 前端编译
@@ -82,12 +93,12 @@ jobs:
     - name: Build binary
       run: |
         cd cflow
-        # 编译多架构二进制（保留原有逻辑）
+        # 编译多架构二进制
         GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o cflow ./cmd/cflow/main.go && rm -f artifact/* && cp cflow artifact/cflow.exe && cd artifact && tar -czvf ../cflow-windows-amd64.tar.gz * && cd ..
         GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o cflow ./cmd/cflow/main.go && rm -f artifact/* && cp cflow artifact/cflow && cd artifact && tar -czvf ../cflow-freebsd-amd64.tar.gz * && cd ..
         GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o cflow ./cmd/cflow/main.go && rm -f artifact/* && cp cflow artifact/cflow && cd artifact && tar -czvf ../cflow-darwin-amd64.tar.gz * && cd ..
         GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o cflow ./cmd/cflow/main.go && rm -f artifact/* && cp cflow artifact/cflow && cd artifact && tar -czvf ../cflow-linux-amd64.tar.gz * && cd ..
-        # 新增 Linux-arm64 架构编译（适配需求）
+        # 新增 Linux-arm64 架构
         GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o cflow ./cmd/cflow/main.go && rm -f artifact/* && cp cflow artifact/cflow && cd artifact && tar -czvf ../cflow-linux-arm64.tar.gz * && cd ..
         cd ..
         
@@ -100,12 +111,11 @@ jobs:
             cflow/cflow-freebsd-amd64.tar.gz
             cflow/cflow-darwin-amd64.tar.gz
             cflow/cflow-linux-amd64.tar.gz
-            cflow/cflow-linux-arm64.tar.gz  # 新增 arm64 产物
+            cflow/cflow-linux-arm64.tar.gz
             
     - name: Generate release tag (兼容无标签场景)
       id: tag
       run: |
-        # 若仓库无标签，生成默认标签 v1.0.0
         LATEST_TAG=$(wget -qO- https://api.github.com/repos/Vespa314/cflow/tags | jq -r '.[0].name // "v1.0.0"' | sed 's/^v//')
         echo "release_tag=v$LATEST_TAG" >> $GITHUB_OUTPUT
         echo "最终发布标签：v$LATEST_TAG"
