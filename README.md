@@ -1,2 +1,2 @@
 # memos-binary
-Automatically build [memos](https://github.com/usememos/memos) binaries (Include Frontend) .
+Automatically build [memos](https://github.com/Vespa314/cflow) binaries (Include Frontend) .
