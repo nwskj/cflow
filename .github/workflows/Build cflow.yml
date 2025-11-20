@@ -26,7 +26,10 @@ jobs:
     - name: Clone Repo
       run: |
         git clone https://github.com/Vespa314/cflow.git
+        pnpm setup
+        source ~/.bashrc
         npm install -g pnpm
+        pnpm add -g @bufbuild/buf@1.47.2
 
     - name: Build Frontend
       run: |
