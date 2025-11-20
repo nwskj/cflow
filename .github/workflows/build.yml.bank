@@ -28,6 +28,8 @@ jobs:
     - name: Build Frontend
       run: |
         cd cflow/web
+        # export COREPACK_SKIP_SIGNATURES=true
+        # corepack enable && export COREPACK_SKIP_SIGNATURES=true && pnpm i --frozen-lockfile
         pnpm i --frozen-lockfile
         pnpm build
         mkdir -p ../artifact
@@ -57,28 +59,7 @@ jobs:
             
     - name: Generate release tag
       id: tag
-      run: |
-        # 优化标签获取逻辑：获取最新的标签（去掉重复的 v 前缀）
-        LATEST_TAG=$(wget -qO- https://api.github.com/repos/Vespa314/cflow/tags | jq -r '.[0].name' | sed 's/^v//')
-        echo "release_tag=v$LATEST_TAG" >> $GITHUB_OUTPUT
-        echo "原始标签：$LATEST_TAG，最终标签：v$LATEST_TAG"
-
-    - name: Delete existing tag (if exists)
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        TAG_NAME: ${{ steps.tag.outputs.release_tag }}
-      run: |
-        # 检查标签是否存在，存在则删除（本地+远程）
-        cd cflow
-        git config --global user.email "action@github.com"
-        git config --global user.name "GitHub Action"
-        if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-          echo "删除本地标签 $TAG_NAME"
-          git tag -d "$TAG_NAME"
-        fi
-        # 删除远程标签（忽略不存在的错误）
-        echo "删除远程标签 $TAG_NAME"
-        git push origin --delete "$TAG_NAME" 2>/dev/null || echo "远程标签 $TAG_NAME 不存在，无需删除"
+      run: echo "release_tag=$(wget -qO- https://api.github.com/repos/Vespa314/cflow/tags | gawk -F '["v]' '/name/{print "v"$5;exit}')" >> $GITHUB_OUTPUT
 
     - name: Create release
       uses: softprops/action-gh-release@v1
@@ -91,8 +72,6 @@ jobs:
             cflow/cflow-freebsd-amd64.tar.gz
             cflow/cflow-darwin-amd64.tar.gz
             cflow/cflow-linux-amd64.tar.gz
-        overwrite: true  # 覆盖已存在的同名 release
-
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
