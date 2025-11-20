@@ -60,8 +60,9 @@ jobs:
         cd cflow
         # 二次验证 pnpm 可用性
         pnpm -v
-        # 创建 proto 依赖目录，避免后续权限问题
+        # 创建 proto 依赖目录和 TypeScript 输出目录，避免后续权限问题
         mkdir -p ./proto/google/{api,protobuf}
+        mkdir -p ./web/src/types/proto  # 提前创建 protoc 输出目录
         cd ..
 
     - name: Build Frontend (彻底解决依赖+兼容性问题)
@@ -128,6 +129,8 @@ jobs:
         
         # ==================== 4. 生成 TypeScript 类型文件（路径容错+参数兼容）====================
         echo "生成 TypeScript 类型文件..."
+        # 确保输出目录存在（关键修复：避免 protoc 编译时目录不存在）
+        mkdir -p ./web/src/types/proto
         # 优先项目内插件，其次全局插件
         PLUGIN_PATH="./web/node_modules/.bin/protoc-gen-ts_proto"
         if [ ! -f "$PLUGIN_PATH" ] || [ ! -x "$PLUGIN_PATH" ]; then
@@ -157,6 +160,9 @@ jobs:
         GENERATED_FILES=$(ls ./web/src/types/proto/api/v2/*.ts 2>/dev/null | wc -l)
         if [ $GENERATED_FILES -eq 0 ]; then
           echo "错误：未生成任何 TypeScript 类型文件"
+          # 输出目录结构，便于排查
+          echo "输出目录结构："
+          ls -la ./web/src/types/proto/
           exit 1
         fi
         echo "成功生成 $GENERATED_FILES 个类型文件"
@@ -168,6 +174,11 @@ jobs:
         pnpm build --mode production --sourcemap false || {
           echo "前端编译失败，输出构建日志："
           cat node_modules/.pnpm-debug.log 2>/dev/null
+          # 输出依赖和环境信息
+          echo "Node 版本：$(node -v)"
+          echo "PNPM 版本：$(pnpm -v)"
+          echo "依赖列表："
+          pnpm list
           exit 1
         }
         cd ..
