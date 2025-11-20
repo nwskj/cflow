@@ -22,43 +22,58 @@ jobs:
 
     - name: Install system dependencies
       run: |
-        # 安装 Protobuf 编译器（生成 TS 类型必需）
-        sudo apt update && sudo apt install -y protobuf-compiler jq
+        # 安装 Protobuf 编译器、jq、unzip（下载依赖用）
+        sudo apt update && sudo apt install -y protobuf-compiler jq unzip
 
     - name: Clone Repo
       run: |
         git clone https://github.com/Vespa314/cflow.git
         npm install -g pnpm
 
-    - name: Build Frontend (含 Protobuf 类型生成)
+    - name: Build Frontend (含 Protobuf 类型生成 + 公共依赖补充)
       run: |
         cd cflow/web
         # 安装前端依赖（含 protoc-gen-ts_proto 生成插件）
         pnpm i --frozen-lockfile
-        # 回到项目根目录，生成 Protobuf TypeScript 类型文件
+        # 回到项目根目录
         cd ..
-        # 1. 确认 proto 文件路径（适配项目实际结构）
+        
+        # 1. 下载 Google Protobuf 公共依赖（解决 google/api/annotations.proto 缺失）
+        echo "下载 Google Protobuf 公共依赖..."
+        mkdir -p ./proto/google/api  # 创建依赖存放目录
+        # 从 GitHub 下载 annotations.proto 和 http.proto（Google 官方定义）
+        wget -qO ./proto/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto
+        wget -qO ./proto/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto
+        
+        # 2. 确认 proto 文件路径（适配项目实际结构）
         PROTO_DIR="./proto/api/v2"
         if [ ! -d "$PROTO_DIR" ]; then
-          PROTO_DIR="./web/proto/api/v2"  # 备用路径（若 proto 在 web 目录下）
+          PROTO_DIR="./web/proto/api/v2"  # 备用路径
         fi
         echo "使用 proto 文件路径：$PROTO_DIR"
         
-        # 2. 生成 TS 类型文件（输出到 web/src/types/proto，对应代码中的 @/types/proto）
+        # 3. 生成 TS 类型文件（指定 --proto_path 让 protoc 找到依赖）
         protoc \
+          --proto_path=./proto \  # 根 proto 目录（包含 google/api 和 api/v2）
           --plugin=./web/node_modules/.bin/protoc-gen-ts_proto \
           --ts_proto_out=./web/src/types/proto \
           --ts_proto_opt=esModuleInterop=true,forceLong=string,useOptionals=messages \
           $PROTO_DIR/*.proto
         
-        # 3. 验证类型文件是否生成成功
-        ls -la ./web/src/types/proto/api/v2/ || echo "警告：类型文件未生成，可能 proto 路径错误"
+        # 4. 验证类型文件是否生成成功
+        if [ -d "./web/src/types/proto/api/v2/" ]; then
+          echo "类型文件生成成功，文件列表："
+          ls -la ./web/src/types/proto/api/v2/
+        else
+          echo "错误：类型文件未生成，请检查 proto 路径或依赖文件"
+          exit 1
+        fi
         
-        # 4. 重新进入 web 目录执行前端编译
+        # 5. 执行前端编译
         cd web
         pnpm build
         
-        # 5. 复制前端产物到 server 目录（保持原有逻辑）
+        # 6. 复制前端产物到 server 目录
         mkdir -p ../artifact
         rm -rf ../server/router/frontend/dist
         mkdir -p ../server/router/frontend
