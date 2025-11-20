@@ -26,10 +26,25 @@ jobs:
     - name: Clone Repo
       run: |
         git clone https://github.com/Vespa314/cflow.git
-        pnpm setup
-        source ~/.bashrc
-        npm install -g pnpm
+        # npm install -g pnpm
+        curl -fsSL https://get.pnpm.io/install.sh | sh -
+        source /home/runner/.local/share/pnpm/pnpm-global/5/node_modules/.bin
         pnpm add -g @bufbuild/buf@1.47.2
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 'stable'
+        check-latest: true
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+           ${{ runner.os }}-go-
 
     - name: Build Frontend
       run: |
@@ -37,8 +52,7 @@ jobs:
         # export COREPACK_SKIP_SIGNATURES=true
         # corepack enable && export COREPACK_SKIP_SIGNATURES=true && pnpm i --frozen-lockfile
         pnpm i --frozen-lockfile
-        pnpm add -g @bufbuild/buf@1.47.2
-        
+
         echo "正在生成 Protobuf TS 类型文件..."
         mkdir -p src/types/proto  # 确保输出目录存在
 
