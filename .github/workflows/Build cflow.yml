@@ -33,6 +33,7 @@ jobs:
         run: |
           cd cflow/web
           pnpm i --frozen-lockfile
+          pnpm exec buf generate
           pnpm build
           mkdir -p ../artifact
           rm -rf ../server/router/frontend/dist
