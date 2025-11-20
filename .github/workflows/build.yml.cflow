@@ -1,0 +1,308 @@
+name: Build1
+
+# 新增 push 触发：修改任意文件（含 YAML）都会触发构建；保留手动触发
+on: 
+  workflow_dispatch:  # 手动触发（原功能保留）
+  push:               # 新增：推送代码（含 YAML 修改）自动触发
+    branches: [ main ]  # 可选：限制仅 main 分支推送触发（可根据实际分支名修改）
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 'stable'
+        check-latest: true
+
+    - name: Set up Node.js（先不缓存 pnpm，避免依赖顺序问题）
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: ''  # 禁用自动缓存，手动控制 pnpm 安装
+
+    - name: Install system dependencies (完整依赖集)
+      run: |
+        sudo apt update && sudo apt install -y \
+          protobuf-compiler \
+          jq \
+          unzip \
+          wget \
+          git \
+          curl \
+          build-essential  # 补充编译依赖，避免 node-gyp 报错
+
+    - name: 安装 pnpm 并配置环境（指定稳定版本+固定存储目录）
+      run: |
+        # 安装指定稳定版本（8.15.6），避免版本差异导致的命令问题
+        npm install -g pnpm@8.15.6 --registry=https://registry.npmmirror.com
+        # 验证 pnpm 版本和路径
+        pnpm -v
+        echo "PNPM 路径：$(which pnpm)"
+        # 固定 pnpm 存储目录（避免自动获取为空）
+        PNPM_STORE="$HOME/.pnpm-store"
+        echo "使用固定 PNPM 存储目录：$PNPM_STORE"
+        mkdir -p "$PNPM_STORE"
+        # 手动设置 pnpm 存储目录（确保后续命令使用该目录）
+        pnpm config set store-dir "$PNPM_STORE"
+        # 将 pnpm 全局 bin 目录加入 PATH，确保所有步骤可访问
+        PNPM_BIN=$(pnpm config get global-bin)
+        echo "$PNPM_BIN" >> $GITHUB_PATH
+        echo "已将 PNPM 全局目录 $PNPM_BIN 加入 PATH"
+
+    - name: Clone Repo & 初始化环境
+      run: |
+        git clone https://github.com/Vespa314/cflow.git
+        cd cflow
+        # 二次验证 pnpm 可用性
+        pnpm -v
+        # 创建 proto 依赖目录和 TypeScript 输出目录，避免后续权限问题
+        mkdir -p ./proto/google/{api,protobuf}
+        mkdir -p ./web/src/types/proto  # 提前创建 protoc 输出目录
+        cd ..
+
+    - name: Build Frontend (彻底解决依赖+兼容性问题)
+      run: |
+        cd cflow
+        # ==================== 1. 前端依赖安装（兼容命令+强制安装）====================
+        cd web
+        # 清理缓存（忽略目录不存在错误，兼容首次安装）
+        pnpm store prune || echo "PNPM 存储目录为空或清理失败，跳过清理"
+        # 强制安装 ts-proto 并锁定版本（确保插件存在）
+        pnpm add ts-proto@1.169.0 --save-dev --registry=https://registry.npmmirror.com --force
+        # 安装所有依赖（无锁文件时用 --no-frozen-lockfile，有则保留 --frozen-lockfile）
+        pnpm i --force --no-frozen-lockfile
+        # 验证插件是否存在，不存在则全局安装 fallback
+        if [ ! -f "./node_modules/.bin/protoc-gen-ts_proto" ]; then
+          echo "项目内插件未找到，全局安装..."
+          pnpm add -g ts-proto@1.169.0 --registry=https://registry.npmmirror.com
+        fi
+        cd ..
+        
+        # ==================== 2. 下载完整 Google Protobuf 依赖（含所有间接依赖）====================
+        echo "下载 Google Protobuf 公共依赖..."
+        # 标准 Protobuf 核心类型
+        wget -qO ./proto/google/protobuf/descriptor.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/descriptor.proto
+        wget -qO ./proto/google/protobuf/empty.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/empty.proto
+        wget -qO ./proto/google/protobuf/timestamp.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/timestamp.proto
+        wget -qO ./proto/google/protobuf/field_mask.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/field_mask.proto
+        wget -qO ./proto/google/protobuf/any.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/any.proto
+        wget -qO ./proto/google/protobuf/struct.proto https://raw.githubusercontent.com/protocolbuffers/protobuf/master/src/google/protobuf/struct.proto
+        # Google API 完整依赖
+        wget -qO ./proto/google/api/annotations.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/annotations.proto
+        wget -qO ./proto/google/api/http.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/http.proto
+        wget -qO ./proto/google/api/client.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/client.proto
+        wget -qO ./proto/google/api/field_behavior.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/field_behavior.proto
+        wget -qO ./proto/google/api/launch_stage.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/launch_stage.proto
+        wget -qO ./proto/google/api/httpbody.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/httpbody.proto
+        wget -qO ./proto/google/api/error_reason.proto https://raw.githubusercontent.com/googleapis/googleapis/master/google/api/error_reason.proto
+        
+        # 验证依赖文件下载成功
+        DEPENDENCY_FILES=(
+          "./proto/google/protobuf/descriptor.proto"
+          "./proto/google/api/client.proto"
+          "./proto/google/api/launch_stage.proto"
+        )
+        for file in "${DEPENDENCY_FILES[@]}"; do
+          if [ ! -f "$file" ]; then
+            echo "错误：依赖文件 $file 下载失败"
+            exit 1
+          fi
+        done
+        
+        # ==================== 3. 查找并验证 proto 文件（兼容多路径）====================
+        PROTO_FILES=$(find ./proto -name "*.proto" -path "*/api/v2/*")
+        if [ -z "$PROTO_FILES" ]; then
+          echo "备用路径查找 proto 文件..."
+          PROTO_FILES=$(find ./web/proto -name "*.proto" -path "*/api/v2/*")
+        fi
+        if [ -z "$PROTO_FILES" ]; then
+          echo "错误：未找到任何 api/v2 目录下的 .proto 文件"
+          exit 1
+        fi
+        echo "找到的 proto 文件："
+        echo "$PROTO_FILES"
+        
+        # ==================== 4. 生成 TypeScript 类型文件（适配 gRPC-Web 格式）====================
+        echo "生成 TypeScript 类型文件（适配 gRPC-Web）..."
+        # 确保输出目录存在
+        mkdir -p ./web/src/types/proto
+        # 优先项目内插件，其次全局插件
+        PLUGIN_PATH="./web/node_modules/.bin/protoc-gen-ts_proto"
+        if [ ! -f "$PLUGIN_PATH" ] || [ ! -x "$PLUGIN_PATH" ]; then
+          PLUGIN_PATH=$(which protoc-gen-ts_proto)
+          if [ -z "$PLUGIN_PATH" ]; then
+            echo "错误：未找到 protoc-gen-ts_proto 插件"
+            exit 1
+          fi
+        fi
+        echo "使用插件路径：$PLUGIN_PATH"
+        
+        # 关键修复：每个 ts-proto 参数单独用 --ts_proto_opt 声明（原逗号拼接格式错误）
+        # 优化：移除 addTypePrefix 引号，确保 $type 占位符正常生效
+        protoc \
+          --proto_path=./proto \
+          --plugin=protoc-gen-ts_proto="$PLUGIN_PATH" \
+          --ts_proto_out=./web/src/types/proto \
+          --ts_proto_opt=esModuleInterop=true \
+          --ts_proto_opt=forceLong=string \
+          --ts_proto_opt=useOptionals=none \
+          --ts_proto_opt=addTypePrefix=$type \  # 移除引号，$type 是内置占位符
+          --ts_proto_opt=addGrpcWeb=true \
+          --ts_proto_opt=outputServices=grpc-web \
+          --ts_proto_opt=outputTypeRegistry=true \
+          --ts_proto_opt=exactTypes=false \
+          --ts_proto_opt=useDate=true \
+          --experimental_allow_proto3_optional \
+          $PROTO_FILES || {
+            echo "protoc 编译失败，详细日志："
+            cat ./web/src/types/proto/*.log 2>/dev/null
+            # 输出生成的文件内容片段，便于排查
+            echo "生成的文件列表："
+            ls -la ./web/src/types/proto/api/v2/ 2>/dev/null
+            if [ -d ./web/src/types/proto/api/v2/ ]; then
+              echo "resource_service.ts 前 100 行（若存在）："
+              head -n 100 ./web/src/types/proto/api/v2/resource_service.ts 2>/dev/null
+            fi
+            exit 1
+          }
+        
+        # ==================== 5. 验证类型文件生成结果 ====================
+        mkdir -p ./web/src/types/proto/api/v2
+        GENERATED_FILES=$(ls ./web/src/types/proto/api/v2/*.ts 2>/dev/null | wc -l)
+        if [ $GENERATED_FILES -eq 0 ]; then
+          echo "错误：未生成任何 TypeScript 类型文件"
+          echo "输出目录结构："
+          ls -la ./web/src/types/proto/
+          exit 1
+        fi
+        echo "成功生成 $GENERATED_FILES 个类型文件"
+        # 验证 ServiceDefinition 是否导出
+        echo "验证 ServiceDefinition 导出："
+        grep -r "export const.*ServiceDefinition" ./web/src/types/proto/api/v2/ || echo "警告：未找到 ServiceDefinition 导出（可能需要调整参数）"
+        # 验证 $type 属性是否存在
+        grep -r "\$type" ./web/src/types/proto/api/v2/resource_service.ts 2>/dev/null || echo "警告：未找到 \$type 属性（可能需要调整参数）"
+        
+        # ==================== 6. 前端编译（移除静默模式，便于排查）====================
+        cd web
+        rm -rf dist
+        echo "开始前端编译..."
+        # 编译前先执行 tsc 检查，输出详细错误
+        pnpm tsc --noEmit || {
+          echo "TypeScript 类型检查失败，详细错误："
+          exit 1
+        }
+        # 执行构建
+        pnpm build --mode production --sourcemap false || {
+          echo "前端编译失败，输出构建日志："
+          cat node_modules/.pnpm-debug.log 2>/dev/null
+          echo "Node 版本：$(node -v)"
+          echo "PNPM 版本：$(pnpm -v)"
+          echo "TypeScript 版本：$(pnpm exec tsc -v)"
+          exit 1
+        }
+        cd ..
+        
+        # ==================== 7. 复制前端产物（权限修复）====================
+        mkdir -p ../artifact
+        rm -rf ./server/router/frontend/dist
+        mkdir -p ./server/router/frontend/dist
+        cp -R ./web/dist/* ./server/router/frontend/dist/
+        chmod -R 755 ./server/router/frontend/dist
+        echo "前端产物复制完成"
+        cd ..
+
+    - name: Build binary（优化编译流程）
+      run: |
+        cd cflow
+        mkdir -p artifact
+        # Windows-amd64
+        GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o artifact/cflow.exe ./cmd/cflow/main.go
+        cd artifact && tar -czvf ../cflow-windows-amd64.tar.gz cflow.exe && cd ..
+        # FreeBSD-amd64
+        GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o artifact/cflow ./cmd/cflow/main.go
+        cd artifact && tar -czvf ../cflow-freebsd-amd64.tar.gz cflow && cd ..
+        # Darwin-amd64
+        GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o artifact/cflow ./cmd/cflow/main.go
+        cd artifact && tar -czvf ../cflow-darwin-amd64.tar.gz cflow && cd ..
+        # Linux-amd64
+        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o artifact/cflow ./cmd/cflow/main.go
+        cd artifact && tar -czvf ../cflow-linux-amd64.tar.gz cflow && cd ..
+        # Linux-arm64
+        GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o artifact/cflow ./cmd/cflow/main.go
+        cd artifact && tar -czvf ../cflow-linux-arm64.tar.gz cflow && cd ..
+        # 清理临时文件
+        rm -f artifact/cflow*
+        cd ..
+        
+    - name: Upload artifact（稳定版本）
+      uses: actions/upload-artifact@v4
+      with:
+        name: cflow-pre-built
+        path: |
+            cflow/cflow-windows-amd64.tar.gz
+            cflow/cflow-freebsd-amd64.tar.gz
+            cflow/cflow-darwin-amd64.tar.gz
+            cflow/cflow-linux-amd64.tar.gz
+            cflow/cflow-linux-arm64.tar.gz
+        retention-days: 3
+        
+    - name: Generate release tag（兼容无标签+错误处理）
+      id: tag
+      run: |
+        LATEST_TAG=$(curl -s -m 10 https://api.github.com/repos/Vespa314/cflow/tags | jq -r '.[0].name // "v1.0.0"' | sed 's/^v//')
+        if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
+          LATEST_TAG="1.0.0"
+        fi
+        echo "release_tag=v$LATEST_TAG" >> $GITHUB_OUTPUT
+        echo "最终发布标签：v$LATEST_TAG"
+
+    - name: Delete existing tag (if exists)
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG_NAME: ${{ steps.tag.outputs.release_tag }}
+      run: |
+        cd cflow
+        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"
+        if [ -d .git ]; then
+          git fetch --tags
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            git tag -d "$TAG_NAME"
+            echo "删除本地标签 $TAG_NAME"
+          fi
+          git push origin --delete "$TAG_NAME" 2>/dev/null || echo "远程标签 $TAG_NAME 不存在"
+        else
+          echo "非 git 仓库，跳过标签删除"
+        fi
+        cd ..
+
+    - name: Create release（稳定版+容错）
+      uses: softprops/action-gh-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        files: |
+            cflow/cflow-windows-amd64.tar.gz
+            cflow/cflow-freebsd-amd64.tar.gz
+            cflow/cflow-darwin-amd64.tar.gz
+            cflow/cflow-linux-amd64.tar.gz
+            cflow/cflow-linux-arm64.tar.gz
+        overwrite: true
+        draft: false
+        prerelease: false
+        fail_on_unmatched_files: false
+
+    - name: Delete workflow runs（可选优化）
+      if: always()
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        token: ${{ github.token }}
+        repository: ${{ github.repository }}
+        retain_days: 1
+        keep_minimum_runs: 8
